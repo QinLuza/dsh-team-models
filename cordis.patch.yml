@@ -1,0 +1,15 @@
+# dsh-team-models — per-teammate model selection for DeepSeek Harness Agent Teams (Host bundle)
+#
+# Mount: add `dsh-team-models` to the profile's `dsh.profile.bundles`, then restart the host.
+# If the loader reports "failed to import" for the bare package name, point `name` at the
+# absolute path of the installed `lib/index.js` instead.
+- insert:
+    - id: team-models
+      name: 'dsh-team-models'
+      # Optional config (all keys optional):
+      # config:
+      #   defaultModel: 'provider/model$high'   # team default; unset = keep dispatch route (inherit Lead)
+      #   allowSelfSelect: true                 # false hides set/reset from teammates
+      #   overrides:                            # first-run seed only; the state file wins afterwards
+      #     - member: grader
+      #       model: 'provider/model'
