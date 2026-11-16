@@ -25,7 +25,24 @@ export class TeamModelService {
     private readonly persist: (state: TeamModelState) => void,
   ) {}
 
-  /** 请求期路由解析（waterfall 的 current getter 用）。 */
+  /** Whether a durable selection was written by this plugin, including cold members. */
+  manages(sessionId: string): boolean {
+    return this.state.managed?.includes(sessionId) ?? false
+  }
+
+  /** Persist ownership so a reset while cold can restore the descriptor route on resume. */
+  manage(sessionId: string, managed: boolean): void {
+    if (this.manages(sessionId) === managed) return
+    const ids = this.state.managed ?? []
+    const next = {
+      ...this.state,
+      managed: managed ? [...ids, sessionId] : ids.filter(id => id !== sessionId),
+    }
+    this.persist(next)
+    this.state = next
+  }
+
+  /** Resolve the selected route before the next step is prepared. */
   routeFor(member: string): Route | undefined {
     return effectiveRoute(this.state, member)
   }
