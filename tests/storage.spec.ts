@@ -23,6 +23,25 @@ describe('loadState', () => {
     expect(loaded.state.overrides.grader).toEqual({ provider: 'p', model: 'm$high' })
   })
 
+  it('preserves managed session ownership across restarts and accepts older v1 files', () => {
+    const path = tempFile()
+    saveState(path, { version: 1, overrides: {}, managed: ['cold-child', 'cold-child'] })
+    expect(loadState(path).state.managed).toEqual(['cold-child'])
+    saveState(path, { version: 1, overrides: {} })
+    expect(loadState(path).state.managed).toBeUndefined()
+  })
+
+  it('drops invalid ownership metadata without discarding valid routes', () => {
+    const path = tempFile()
+    writeFileSync(path, JSON.stringify({
+      version: 1, overrides: { grader: { provider: 'p', model: 'm' } }, managed: [null],
+    }), 'utf8')
+    const loaded = loadState(path)
+    expect(loaded.state.overrides.grader).toEqual({ provider: 'p', model: 'm' })
+    expect(loaded.state.managed).toBeUndefined()
+    expect(loaded.warning).toContain('managed')
+  })
+
   it('drops entries whose route shape is invalid and reports them', () => {
     const path = tempFile()
     writeFileSync(path, JSON.stringify({

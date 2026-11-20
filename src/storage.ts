@@ -64,7 +64,11 @@ export function loadState(path: string): LoadedState {
       ? parsed.defaultModel
       : (dropped.push('defaultModel'), undefined)
 
-  const state: TeamModelState = { version: 1, defaultModel, overrides }
+  const managed = parsed.managed === undefined ? undefined
+    : Array.isArray(parsed.managed) && parsed.managed.every(id => typeof id === 'string' && id.length > 0)
+      ? [...new Set(parsed.managed as string[])]
+      : (dropped.push('managed'), undefined)
+  const state: TeamModelState = { version: 1, defaultModel, overrides, ...(managed === undefined ? {} : { managed }) }
   if (dropped.length === 0) return { state }
   return {
     state,

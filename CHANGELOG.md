@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1
+
+- Adapt to DSH 0.2.2-rc.3: replace removed Team membership APIs and route
+  waterfalls with subagent tree discovery and `agent.model.select()`.
+- Initialize new and resumed children on `subagent/start`, gate Team tools by
+  live mode, and dispose Agent registrations when the plugin unloads.
+- Persist selection ownership so resets made while a member is cold restore
+  its descriptor route on resume; retain version-1 state compatibility.
+- Pin current DSH development dependencies and test the real AgentModel adapter.
+
 ## 0.1.0
 
 Initial release.

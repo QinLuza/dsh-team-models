@@ -7,7 +7,7 @@ export interface Route {
   reasoningEffort?: string
 }
 
-/** 一个 Team 成员的确切身份（由 agentTeams.membership 投影而来）。 */
+/** 一个 Team 成员的确切身份（由子代理树的运行时归属确定）。 */
 export interface Membership {
   role: 'lead' | 'teammate'
   name: string
@@ -18,6 +18,8 @@ export interface TeamModelState {
   version: 1
   defaultModel?: Route
   overrides: Record<string, Route>
+  /** Sessions with plugin-written durable selections; retained until dispatch is restored. */
+  managed?: string[]
 }
 
 /** 成员生效路由的来源。 */

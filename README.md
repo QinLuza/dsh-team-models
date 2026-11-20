@@ -10,45 +10,48 @@ switch models at request time. No base modifications, no changes to the global d
 
 ## Why
 
-In DSH Agent Teams, a teammate's model is **snapshotted at spawn** into its durable
-`subagent/descriptor` event, and every later wake-up routes from that snapshot. The official
-spawn chain does not accept a model parameter, and the generic session routes refuse model
-switching for subagent-owned sessions (`session/agent-busy`); the desktop model picker hides
-itself for teammate sessions.
-
-The practical consequence: a teammate pinned to an exhausted quota — or to a model that is
-simply wrong for its job — cannot be re-routed without tearing the team down.
+DSH 0.2.2 provides `agent.model.select()` for changing an Agent's next step. This
+plugin exposes that capability as Team tools, with per-member authorization and a
+persistent default for new and resumed teammates. The original dispatch route remains
+in each teammate's descriptor and is restored when its plugin override is cleared.
 
 ## How it works
 
-The plugin installs the official `installModelSelection` waterfalls on each **teammate's**
-`agent.ctx` and resolves the route at request time:
+The plugin uses `subagents.rootOf()`, `namesOf()`, and `listDescendants()` for
+membership and calls each **teammate's** `agent.model.select()` before its next step:
 
 ```
 per-teammate override  >  team default model  >  dispatch route (inherit Lead, unchanged)
 ```
 
-- With nothing configured, every waterfall passes through untouched — behavior is identical
-  to not having the plugin installed.
-- Overrides and the team default live in `$DSH_HOME/storages/team-models/state.json`
-  (atomic writes, field-level validation, corrupt files quarantined) and survive restarts.
-- The plugin never writes the global default model and never introduces new session event
-  types; it only appends the existing `model/selection` event as a best-effort echo.
+- With nothing configured, never-managed sessions keep their native model selection.
+- Overrides, the default, and an optional `managed` Session ID list live in
+  `$DSH_HOME/storages/team-models/state.json` (atomic writes, field validation,
+  corrupt-file quarantine). Existing version-1 files remain readable.
+- Ownership is saved before selecting a model. A reset while a teammate is cold
+  restores its descriptor route through `agent.options` when it next resumes.
+- New and resumed children are initialized synchronously on `subagent/start`, after
+  runtime ownership exists and before their first prompt. External executions are excluded.
+- Tools follow **Use Agent Teams** dynamically. Turning Team mode off restores live
+  managed members to dispatch; turning it on reapplies their configured routes.
+- Selections use the official durable `model/selection` event. No global default or
+  custom Session event is written, and already-prepared requests keep their fixed route.
 
 ## Install
 
-Requires DSH `>=0.2.1-rc.5 <0.3.0` and Node `>=22.19`.
+Requires DSH `>=0.2.2-rc.3 <0.3.0` and Node `>=22.19`. The compatibility tests
+pin DSH `0.2.2-rc.3`; older APIs (`tryMembership` and selection waterfalls) are unsupported.
 
 ```bash
 npm install
 npm run build      # produces lib/index.js
 ```
 
-Then mount it in a profile (e.g. `desktop`): add the package to the profile's
-`dependencies` (a `link:` to this checkout works) and add `dsh-team-models` to
-`dsh.profile.bundles`, then restart the host. The bundle's `cordis.patch.yml` inserts the
-plugin row; if your loader rejects the bare package name, point the row's `name` at the
-absolute path of the installed `lib/index.js`.
+Then install this built directory through DSH **Plugins > Add plugin**, or with
+`plugin_manager` `install_bundle`. To install a self-contained artifact, run
+`npm pack` and install the resulting tarball. The manager saves the dependency and
+bundle selection; follow its result if a host restart is required. Building first is
+necessary because the source repository does not contain `lib/index.js`.
 
 ## Configuration
 
@@ -92,14 +95,15 @@ of the official model selection), without interrupting an in-flight request.
 ## Development
 
 ```bash
-npm test           # vitest: routing precedence, identity matrix, storage, waterfalls
+npm test           # routing, authorization, storage, current DSH adapter and lifecycle
 npm run typecheck  # tsc --noEmit
 npm run build      # tsdown
 ```
 
-The waterfall tests run against the real `installModelSelection` from
-`@deepseek-ai/dsh-agent`, asserting both the zero-intervention passthrough and the override
-behavior.
+Adapter tests exercise the plugin entry against the current DSH `AgentModel`,
+including dispatch restoration, cold reset, first-prompt lifecycle ordering,
+Team-mode gating, scoped unload, and unchanged native selections. Runtime membership
+and tool registration use fixtures; the development dependencies pin the real API.
 
 ## Limitations
 
@@ -107,17 +111,22 @@ behavior.
 - No client UI in this release (Host half only).
 - State is keyed by member name without a team dimension: two teams with identically named
   members would share overrides. Single-team deployments are the intended scope.
-- Clearing an override falls back silently (the upstream notice waterfall early-returns when
-  no selection is present); the request header still records the new route.
+- A managed member needs an explicit dispatch provider/model in `agent.options` to
+  restore its original route. An unavailable baseline is reported rather than fabricated.
+- Selections are durable. Unloading removes tools and listeners but does not undo
+  recorded choices; reset overrides and clear the default before uninstalling.
+- Old 0.1.0 state files have no ownership metadata. Historical selections whose
+  overrides were already removed cannot be distinguished from native choices; set
+  and reset that member once to establish ownership before restoring dispatch.
 - Model strings are syntax-checked only; provider/model existence and reasoning-level
   support are validated by the provider at request time.
-- Verified on DSH `0.2.1-rc.5`; other versions are not covered.
+- Compatibility tests target DSH `0.2.2-rc.3`; other versions are not covered.
 
 ## Retirement
 
-This plugin exists because upstream does not yet offer per-teammate model selection. If DSH
-adds it (or lets `model/selection` override the descriptor), this plugin should be retired
-rather than maintained in parallel.
+This plugin supplies Team-facing tools and persistent defaults on top of the official
+Agent model-selection API. If DSH provides equivalent Team tools and defaults, prefer
+those rather than maintaining two independent sources of Team configuration.
 
 ## License
 
@@ -129,24 +138,26 @@ MIT — see [LICENSE](LICENSE).
 
 **给 DeepSeek Harness（DSH）Agent Teams 补上「每个队友自选模型」的外置 Host 插件。**
 
-队友的模型在 spawn 时被快照进 durable 的 `subagent/descriptor`，之后每次唤醒都按它路由；
-官方 spawn 链不接受模型参数，通用会话路由对 subagent 会话一律拒绝换模型，桌面选择器也对
-队友隐藏。结果就是：队友被钉死在一条耗尽额度或不合适的路由上，只能拆队重建。
+适配 DSH `0.2.2-rc.3`：使用官方 `agent.model.select()` 更新下一步模型，
+通过 `subagents.rootOf / namesOf / listDescendants` 查询成员；不再使用旧版成员接口或
+旧路由 waterfall。新建与冷恢复成员在运行时身份就绪后的 `subagent/start` 同步初始化。
 
-本插件在每个 **teammate** 的 `agent.ctx` 上安装官方 `installModelSelection` 的 waterfall，
-请求期按 `成员覆盖 > 团队默认 > 派发路由` 解析；未配置时完全直通，行为与未装插件一致。
-覆盖与团队默认落在 `$DSH_HOME/storages/team-models/state.json`（原子写、字段级校验、
-坏文件隔离），跨重启存活；不碰全局默认模型，不新增事件类型。
+路由优先级为 `成员覆盖 > 团队默认 > 派发路由`。未被插件管理的原生模型选择保持不变。
+覆盖、默认值与可选的受管理 Session ID 列表持久化到
+`$DSH_HOME/storages/team-models/state.json`，旧版 v1 文件仍可读取。成员离线期间重置覆盖，
+会在下次恢复时从 `agent.options` 还原描述符中的派发模型。不碰全局默认模型，不新增事件类型。
 
 四个 agent 工具：`team_model_list` / `team_model_set` / `team_model_reset` /
 `team_model_default`。身份取自 `exec.agent`：Lead 可改任意队友，队友只能点名自己
 （`allowSelfSelect=false` 可整体关闭队友自助）。改动在队友**下一个 step** 生效。
 
-安装：`npm install && npm run build`，把包加进 profile 的 `dependencies` 与
-`dsh.profile.bundles`（`dsh-team-models`），重启宿主。配置与工具示例见上文英文部分。
+安装：`npm ci && npm run build`，通过 DSH 插件管理器安装构建目录或 `npm pack` 生成的包。
+工具随“使用 Agent Teams”开关生效；关闭 Team 模式时还原已管理的在线成员。
 
-已知限制：仅覆盖 teammate；无客户端 UI；状态按成员名索引、无 team 维度（单团队场景适用）；
-清除覆盖后回落不带提示；模型串只做语法校验。已在 DSH `0.2.1-rc.5` 上通过单测与真机行为门。
-上游若原生支持 per-teammate 选择，本插件应退役而非并行维护。
+已知限制：仅覆盖可继续运行的本地 teammate；无客户端 UI；状态仍按成员名索引、无 team 维度，
+适用于单团队；模型串只做语法校验。派发模型必须包含明确的 provider/model。
+旧 0.1.0 已删除覆盖的历史选择无法识别归属，可对该成员先设置再重置以还原派发模型。
+官方选择是持久化的，卸载前应先重置覆盖并清除默认值。测试依赖固定为 DSH `0.2.2-rc.3`。
+若上游提供同等 Team 工具与默认值管理，应优先使用上游功能。
 
 MIT 许可。

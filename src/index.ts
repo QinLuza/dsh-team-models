@@ -3,6 +3,8 @@
 import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent-team'
+import type {} from '@deepseek-ai/dsh-subagent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
@@ -13,7 +15,7 @@ import { loadState, saveState, statePath } from './storage.ts'
 import type { Route } from './types.ts'
 
 export const name = 'team-models'
-export const inject = ['agents', 'agentTeams', 'tools']
+export const inject = ['agents', 'agentTeams', 'subagents', 'tools']
 
 export interface Config {
   /** 团队默认模型串（provider/model[$level]）；仅在状态文件没有 defaultModel 时作为种子。 */
@@ -81,17 +83,6 @@ const DEFAULT_VALUE_SCHEMA = {
   properties: { defaultModel: { type: 'string' } },
 } as const
 
-/** 本插件依赖的 agentTeams 服务最小面：实验包未随 rc5 发布到 npm，用结构类型对接。 */
-interface TeamMembershipLike {
-  role: 'lead' | 'teammate'
-  name: string
-}
-
-interface TeamServiceLike {
-  tryMembership(agent: Agent): TeamMembershipLike | undefined
-  listMembers(agent: Agent): Array<{ id: string; name: string; role: 'lead' | 'teammate' }>
-}
-
 /** 把内部 Route 转成宿主 ModelSelection（reasoningEffort 是宿主品牌类型）。 */
 function toSelection(route: Route): ModelSelection {
   return {
@@ -146,37 +137,54 @@ export function apply(ctx: Context, config: Config): void {
 
   const allowSelfSelect = config.allowSelfSelect ?? true
   const service = new TeamModelService(state, allowSelfSelect, (next) => saveState(persistPath, next))
-  const agentTeams = ctx.get('agentTeams') as unknown as TeamServiceLike
+  const { agentTeams, subagents } = ctx
 
-  const envFor = (agent: Agent): TeamEnv | undefined => {
-    const membership = agentTeams.tryMembership(agent)
-    if (membership === undefined) return undefined
-    return {
-      caller: { role: membership.role, name: membership.name },
-      members: () => agentTeams.listMembers(agent).map((m) => ({ name: m.name, role: m.role })),
-      echo: (memberName, route) => {
-        const row = agentTeams.listMembers(agent).find((m) => m.name === memberName)
-        if (row === undefined) return
-        const target = ctx.agents.list().find((live) => String(live.id) === row.id)
-        if (target === undefined) return
-        // 'model/selection' 是宿主既有事件（modelSelection 投影消费它），
-        // 事件表由 session-controller 包增补；本插件不带该包类型，故窄化 append。
-        const session = target.session as unknown as { append(type: string, payload: unknown): void }
-        try {
-          session.append('model/selection', toSelection(route))
-        } catch (error) {
-          // 回显是尽力而为：落盘/换入已完成，回显失败不能让工具报错。
-          console.warn(`[team-models] cannot echo model/selection for "${memberName}": ${String(error)}`)
-        }
-      },
-    }
+  const syncModel = (agent: Agent): void => {
+    if (subagents.rootOf(agent) === agent) return
+    const route = agentTeams.isEnabled(agent) ? service.routeFor(subagents.namesOf(agent).self) : undefined
+    if (route === undefined && !service.manages(agent.id)) return
+    const { provider, model, reasoningEffort } = agent.options
+    const selected = route === undefined
+      ? provider && model ? { provider, model, reasoningEffort } : undefined
+      : toSelection(route)
+    if (selected === undefined) throw new Error(`cannot restore dispatch model for ${agent.id}: no explicit dispatch route`)
+    // Persist ownership before the durable selection; cold resume can compensate after a reset.
+    if (route !== undefined) service.manage(agent.id, true)
+    agent.model.select(selected)
+    if (route === undefined) service.manage(agent.id, false)
   }
 
-  const requireEnv = (agent: Agent | undefined, toolName: string): TeamEnv => {
+  const installs = new Map<Agent, () => void>()
+  const syncModels = (): void => {
+    const failures: unknown[] = []
+    for (const agent of installs.keys()) {
+      try { syncModel(agent) } catch (error) { failures.push(error) }
+    }
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1) throw new AggregateError(failures, 'cannot synchronize Team model selections')
+  }
+
+  const requireEnv = async (agent: Agent | undefined, toolName: string, signal: AbortSignal): Promise<TeamEnv> => {
     const caller = callingAgent(agent, toolName)
-    const env = envFor(caller)
-    if (env === undefined) throw new Error(`${toolName} requires a session that belongs to an Agent Team`)
-    return env
+    if (!agentTeams.isEnabled(caller)) throw new Error(`${toolName} requires Agent Team mode`)
+    const root = subagents.rootOf(caller)
+    const descendants = await subagents.listDescendants(root.id, signal)
+    signal.throwIfAborted()
+    // Team mode and exact live ownership may have changed during the catalog read.
+    if (!agentTeams.isEnabled(caller) || subagents.rootOf(caller) !== root) {
+      throw new Error(`${toolName} requires an active Agent Team`)
+    }
+    const members: Array<{ name: string; role: 'lead' | 'teammate' }> = [{ name: 'lead', role: 'lead' }]
+    for (const row of descendants) {
+      if (row.kind === 'child' && row.mode === 'continuable') {
+        members.push({ name: row.path ?? row.id, role: 'teammate' })
+      }
+    }
+    return {
+      caller: { role: caller === root ? 'lead' : 'teammate', name: subagents.namesOf(caller).self },
+      members: () => members,
+      echo: () => syncModels(),
+    }
   }
 
   const toolsFor = (role: 'lead' | 'teammate'): Array<ReturnType<typeof defineTool>> => {
@@ -188,7 +196,7 @@ export function apply(ctx: Context, config: Config): void {
       parameters: {},
       output: jsonOutput(LIST_VALUE_SCHEMA),
       async execute(_args, exec) {
-        return service.list(requireEnv(exec.agent, 'team_model_list'))
+        return service.list(await requireEnv(exec.agent, 'team_model_list', exec.signal))
       },
     })
 
@@ -207,7 +215,7 @@ export function apply(ctx: Context, config: Config): void {
       },
       output: jsonOutput(SET_VALUE_SCHEMA),
       async execute(args, exec) {
-        const env = requireEnv(exec.agent, 'team_model_set')
+        const env = await requireEnv(exec.agent, 'team_model_set', exec.signal)
         const parsed = parseRoute(args.model)
         if ('error' in parsed) throw new Error(parsed.error)
         return { row: service.set(env, args.target, parsed) }
@@ -228,8 +236,10 @@ export function apply(ctx: Context, config: Config): void {
       },
       output: jsonOutput(RESET_VALUE_SCHEMA),
       async execute(args, exec) {
-        const env = requireEnv(exec.agent, 'team_model_reset')
-        return service.reset(env, args.target)
+        const env = await requireEnv(exec.agent, 'team_model_reset', exec.signal)
+        const result = service.reset(env, args.target)
+        syncModels()
+        return result
       },
     })
 
@@ -243,47 +253,64 @@ export function apply(ctx: Context, config: Config): void {
       },
       output: jsonOutput(DEFAULT_VALUE_SCHEMA),
       async execute(args, exec) {
-        const env = requireEnv(exec.agent, 'team_model_default')
-        if (args.model === undefined) return service.setDefault(env, undefined)
-        const parsed = parseRoute(args.model)
-        if ('error' in parsed) throw new Error(parsed.error)
-        return service.setDefault(env, parsed)
+        const env = await requireEnv(exec.agent, 'team_model_default', exec.signal)
+        const parsed = args.model === undefined ? undefined : parseRoute(args.model)
+        if (parsed !== undefined && 'error' in parsed) throw new Error(parsed.error)
+        const result = service.setDefault(env, parsed)
+        syncModels()
+        return result
       },
     })
 
     return role === 'lead' ? [listTool, setTool, resetTool, defaultTool] : [listTool, setTool, resetTool]
   }
 
-  const installs = new Map<Agent, () => void>()
-
   const maybeInstall = (agent: Agent): void => {
     if (installs.has(agent)) return
-    const env = envFor(agent)
-    if (env === undefined) return
-
-    const disposers: Array<() => void> = []
-    if (env.caller.role === 'teammate') {
-      const memberName = env.caller.name
-      disposers.push(installModelSelection(agent.ctx, {
-        get current(): ModelSelection | undefined {
-          const route = service.routeFor(memberName)
-          return route === undefined ? undefined : toSelection(route)
-        },
-        assembled: undefined,
+    const role = subagents.rootOf(agent) === agent ? 'lead' : 'teammate'
+    const dispose = agent.ctx.effect(() => {
+      const disposers = toolsFor(role).map(tool => agent.ctx.tools.register(tool, {
+        when: ({ agent: caller }) => agentTeams.isEnabled(caller),
       }))
-    }
-    for (const tool of toolsFor(env.caller.role)) {
-      disposers.push(agent.ctx.tools.register(tool))
-    }
-
-    installs.set(agent, () => {
-      for (const dispose of disposers) dispose()
-    })
+      if (role === 'teammate') disposers.push(installModelSelection(agent.ctx))
+      return () => { for (const stop of disposers) stop() }
+    }, 'team-models.tools()')
+    installs.set(agent, dispose)
+    syncModel(agent)
   }
 
-  for (const agent of ctx.agents.list()) maybeInstall(agent)
+  // A child's agent/created notification precedes its runtime Activation. Only
+  // subagent/start guarantees rootOf/namesOf and runs before the first prompt.
+  ctx.on('subagent/start', info => {
+    if (!info.local) return
+    const agent = ctx.agents.get(info.id)
+    if (agent !== undefined) maybeInstall(agent)
+  })
   ctx.on('agent/created', ({ agent }) => {
-    maybeInstall(agent)
+    if (agent.session.header.origin !== 'subagent') maybeInstall(agent)
     return undefined
   })
+  ctx.on('agent/disposed', ({ agent }) => {
+    installs.get(agent)?.()
+    installs.delete(agent)
+  })
+  ctx.on('session/event', (_session, event) => {
+    if (event.type !== 'team/mode') return
+    try { syncModels() } catch (error) {
+      console.warn(`[team-models] cannot synchronize Team mode: ${String(error)}`)
+    }
+  })
+  ctx.effect(() => () => {
+    for (const dispose of installs.values()) dispose()
+    installs.clear()
+  }, 'team-models.agents()')
+  for (const agent of ctx.agents.list()) {
+    try { maybeInstall(agent) } catch (error) {
+      // HMR can observe a child between agent/created and runtime publication.
+      // Its imminent subagent/start event will complete installation.
+      if (agent.session.header.origin === 'subagent' && error instanceof Error
+        && 'code' in error && error.code === 'UNAUTHORIZED') continue
+      throw error
+    }
+  }
 }
