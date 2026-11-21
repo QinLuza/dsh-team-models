@@ -11,6 +11,8 @@ export interface TeamEnv {
   members(): ReadonlyArray<{ name: string; role: 'lead' | 'teammate' }>
   /** 尽力把选择回显成既有 model/selection 事件（目标不在线时静默跳过）。 */
   echo(member: string, route: Route): void
+  /** 在线成员的派发路由（agent.options）；effort-only 改动在无覆盖/默认时靠它定位模型。 */
+  dispatchOf(member: string): Route | undefined
 }
 
 export interface TeamModelListValue {
@@ -45,6 +47,22 @@ export class TeamModelService {
   /** Resolve the selected route before the next step is prepared. */
   routeFor(member: string): Route | undefined {
     return effectiveRoute(this.state, member)
+  }
+
+  /** 当前团队默认路由（effort-only 调整默认值时的 current）。 */
+  defaultRoute(): Route | undefined {
+    return this.state.defaultModel
+  }
+
+  /** 目标身份预检：宿主侧做目录校验等 IO 前先挡住越权目标。 */
+  checkTarget(env: TeamEnv, target: string): void {
+    const check = checkSetTarget({
+      caller: env.caller,
+      target,
+      allowSelfSelect: this.allowSelfSelect,
+      teammates: teammatesOf(env),
+    })
+    if (!check.ok) throw new Error(check.error)
   }
 
   list(env: TeamEnv): TeamModelListValue {

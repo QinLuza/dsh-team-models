@@ -39,6 +39,34 @@ export function formatRoute(route: Route): string {
   return route.reasoningEffort === undefined ? base : `${base}$${route.reasoningEffort}`
 }
 
+/**
+ * 解析一次 set/default 的输入：model 与 effort 至少给一个。
+ * - 只给 model：照 parseRoute（可带 $level 后缀）。
+ * - 只给 effort：沿用 current 的 provider/model，仅换思考强度（current 必须已知）。
+ * - 两者都给：effort 参数优先；与后缀冲突时报错，不静默吞。
+ */
+export function resolveSelection(
+  model: string | undefined,
+  effort: string | undefined,
+  current: Route | undefined,
+): Route | { error: string } {
+  if (effort !== undefined && effort.trim().length === 0) return { error: 'effort must not be empty' }
+  if (model === undefined) {
+    if (effort === undefined) return { error: 'pass model, effort, or both' }
+    if (current === undefined) {
+      return { error: 'effort-only change needs a known current route; this member has no override/default and is not online — pass model explicitly' }
+    }
+    return { provider: current.provider, model: current.model, reasoningEffort: effort }
+  }
+  const parsed = parseRoute(model)
+  if ('error' in parsed) return parsed
+  if (effort === undefined) return parsed
+  if (parsed.reasoningEffort !== undefined && parsed.reasoningEffort !== effort) {
+    return { error: `conflicting reasoning levels: model suffix says "${parsed.reasoningEffort}" but effort says "${effort}"` }
+  }
+  return { provider: parsed.provider, model: parsed.model, reasoningEffort: effort }
+}
+
 /** 请求期优先级：override > 团队默认 > 派发路由（undefined 表示直通，不改路由）。 */
 export function effectiveRoute(state: TeamModelState, member: string): Route | undefined {
   return state.overrides[member] ?? state.defaultModel

@@ -68,23 +68,32 @@ All keys are optional (profile patch layer):
         model: 'provider/model'
 ```
 
-Model strings are `provider/model` with an optional `$reasoningLevel` suffix.
+Model strings are `provider/model` with an optional `$reasoningLevel` suffix. Since 0.2.0
+an independent `effort` parameter is also accepted: passing `effort` alone changes only the
+reasoning level of the member's current route (override > team default > live dispatch),
+without re-naming the model. When the host model catalog exposes a model's supported
+reasoning levels, unsupported levels are rejected up front with the supported list;
+routes the catalog cannot resolve keep syntax-only validation (provider decides at request time).
 
 ## Tools
 
 | Tool | Caller | Effect |
 |---|---|---|
 | `team_model_list` | Lead / teammate | List the team default and each member's effective route + source |
-| `team_model_set` | Lead: any teammate; teammate: itself only | Set a per-teammate override |
+| `team_model_set` | Lead: any teammate; teammate: itself only | Set a per-teammate override (model and/or effort) |
 | `team_model_reset` | Lead: any/all; teammate: itself only | Clear overrides, fall back to default/dispatch |
-| `team_model_default` | Lead only | Set or clear the team-wide default |
+| `team_model_default` | Lead only | Set or clear the team-wide default (model and/or effort) |
 
 Identity is taken from the tool execution context (`exec.agent`), not from arguments, so a
 teammate cannot spoof another member. Examples:
 
 ```jsonc
-// Lead
+// Lead: full route with a reasoning suffix
 { "tool": "team_model_set", "target": "grader", "model": "provider-b/model-b$high" }
+// Lead: change only the reasoning level, keep grader's current model
+{ "tool": "team_model_set", "target": "grader", "effort": "low" }
+// Lead: team default model + effort as separate fields
+{ "tool": "team_model_default", "model": "provider-b/model-b", "effort": "medium" }
 // Teammate (self only)
 { "tool": "team_model_set", "target": "grader", "model": "provider-b/model-b" }
 ```
@@ -118,8 +127,9 @@ and tool registration use fixtures; the development dependencies pin the real AP
 - Old 0.1.0 state files have no ownership metadata. Historical selections whose
   overrides were already removed cannot be distinguished from native choices; set
   and reset that member once to establish ownership before restoring dispatch.
-- Model strings are syntax-checked only; provider/model existence and reasoning-level
-  support are validated by the provider at request time.
+- Model strings are validated against the host model catalog's reasoning levels when the
+  adapter exposes them; routes the catalog cannot resolve fall back to syntax-only checks,
+  with provider/model existence validated by the provider at request time.
 - Compatibility tests target DSH `0.2.2-rc.3`; other versions are not covered.
 
 ## Retirement
@@ -151,11 +161,17 @@ MIT — see [LICENSE](LICENSE).
 `team_model_default`。身份取自 `exec.agent`：Lead 可改任意队友，队友只能点名自己
 （`allowSelfSelect=false` 可整体关闭队友自助）。改动在队友**下一个 step** 生效。
 
+0.2.0 起支持**自选思考强度**：`team_model_set` / `team_model_default` 接受独立 `effort`
+参数；只传 `effort` 即「只改思考强度、不动模型」，沿用该成员当前生效路由
+（覆盖 > 团队默认 > 在线派发）。宿主模型目录暴露档位表时，非法档位会被当场拒绝并列出
+可用档位（避免 kimi-k3 选「中」那类请求期才炸的事故）；目录解析不了的路由保持语法校验放行。
+`$后缀` 与 `effort` 同时给出且冲突时报错。
+
 安装：`npm ci && npm run build`，通过 DSH 插件管理器安装构建目录或 `npm pack` 生成的包。
 工具随“使用 Agent Teams”开关生效；关闭 Team 模式时还原已管理的在线成员。
 
 已知限制：仅覆盖可继续运行的本地 teammate；无客户端 UI；状态仍按成员名索引、无 team 维度，
-适用于单团队；模型串只做语法校验。派发模型必须包含明确的 provider/model。
+适用于单团队；模型串在目录可解析时按档位表校验，解析不了时只做语法校验。派发模型必须包含明确的 provider/model。
 旧 0.1.0 已删除覆盖的历史选择无法识别归属，可对该成员先设置再重置以还原派发模型。
 官方选择是持久化的，卸载前应先重置覆盖并清除默认值。测试依赖固定为 DSH `0.2.2-rc.3`。
 若上游提供同等 Team 工具与默认值管理，应优先使用上游功能。

@@ -1,8 +1,8 @@
 {
   "name": "dsh-team-models",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Per-teammate model selection for DeepSeek Harness Agent Teams: a team default model plus agent-callable tools so the Lead (or a teammate itself) can switch a teammate's model at request time, without touching the base or the global default.",
+  "description": "Per-teammate model selection for DeepSeek Harness Agent Teams: a team default model plus agent-callable tools so the Lead (or a teammate itself) can switch a teammate's model and reasoning effort at request time, without touching the base or the global default.",
   "keywords": [
     "dsh",
     "deepseek-harness",
@@ -12,7 +12,8 @@
     "teammate",
     "subagent",
     "model-selection",
-    "model-routing"
+    "model-routing",
+    "reasoning-effort"
   ],
   "engines": {
     "node": ">=22.19.0",
@@ -47,27 +48,17 @@
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.3 <0.3.0",
     "@deepseek-ai/schemastery": "*",
     "@deepseek-ai/dsh-agent-team": ">=0.2.2-rc.3 <0.3.0",
-    "@deepseek-ai/dsh-subagent": ">=0.2.2-rc.3 <0.3.0"
+    "@deepseek-ai/dsh-subagent": ">=0.2.2-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.3 <0.3.0"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-agent": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-tools": {
-      "optional": true
-    },
-    "@deepseek-ai/schemastery": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-agent-team": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-subagent": {
-      "optional": true
-    }
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-agent": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true },
+    "@deepseek-ai/schemastery": { "optional": true },
+    "@deepseek-ai/dsh-agent-team": { "optional": true },
+    "@deepseek-ai/dsh-subagent": { "optional": true },
+    "@deepseek-ai/dsh-llm": { "optional": true }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
@@ -75,6 +66,7 @@
     "@deepseek-ai/dsh-agent-team": "0.2.2-rc.3",
     "@deepseek-ai/dsh-subagent": "0.2.2-rc.3",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
     "@deepseek-ai/schemastery": "3.19.0",
     "@types/node": "^22.0.0",
     "tsdown": "^0.13.0",

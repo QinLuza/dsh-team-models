@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0
+
+- Selectable reasoning effort: `team_model_set` and `team_model_default` accept an
+  independent `effort` parameter. Effort alone changes only the reasoning level of
+  the member's current route (override > team default > live dispatch route);
+  `model` becomes optional on `team_model_set`.
+- Reasoning levels are validated against the host model catalog
+  (`ctx.llm.resolveModelInfo`) whenever the adapter exposes them; unsupported
+  levels are rejected with the supported list instead of failing at request time.
+  Routes the catalog cannot resolve keep the previous syntax-only pass-through
+  (with a warning), so dynamic providers are not broken.
+- Conflicting `$suffix` and `effort` values are rejected; matching ones are accepted.
+- 12 new adapter tests (70 total).
+
+Thanks to @CaFeZn for the 0.2.2 compatibility work in 0.1.1 (PR #1), which this
+release builds on.
+
 ## 0.1.1
 
 - Adapt to DSH 0.2.2-rc.3: replace removed Team membership APIs and route

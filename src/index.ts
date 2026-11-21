@@ -5,17 +5,18 @@ import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-team'
 import type {} from '@deepseek-ai/dsh-subagent'
+import type {} from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import { parseRoute } from './core.ts'
+import { parseRoute, resolveSelection } from './core.ts'
 import { TeamModelService } from './service.ts'
 import type { TeamEnv } from './service.ts'
 import { loadState, saveState, statePath } from './storage.ts'
 import type { Route } from './types.ts'
 
 export const name = 'team-models'
-export const inject = ['agents', 'agentTeams', 'subagents', 'tools']
+export const inject = ['agents', 'agentTeams', 'subagents', 'tools', 'llm']
 
 export interface Config {
   /** 团队默认模型串（provider/model[$level]）；仅在状态文件没有 defaultModel 时作为种子。 */
@@ -184,6 +185,38 @@ export function apply(ctx: Context, config: Config): void {
       caller: { role: caller === root ? 'lead' : 'teammate', name: subagents.namesOf(caller).self },
       members: () => members,
       echo: () => syncModels(),
+      dispatchOf: (member) => {
+        for (const agent of installs.keys()) {
+          if (subagents.rootOf(agent) === agent) continue
+          if (subagents.namesOf(agent).self !== member) continue
+          const { provider, model, reasoningEffort } = agent.options
+          if (provider && model) {
+            return { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) }
+          }
+        }
+        return undefined
+      },
+    }
+  }
+
+  // 目录校验：适配器暴露了档位表就硬校验（kimi-k3 选「中」炸引擎的教训）；
+  // 解析不了的路由保持旧行为——语法检查放行，请求期由 provider 裁决。
+  const validateRoute = async (route: Route, signal: AbortSignal): Promise<void> => {
+    let efforts: ReadonlyArray<{ id: string }> | undefined
+    try {
+      const info = await ctx.llm.resolveModelInfo(route.provider, route.model, signal)
+      efforts = info.reasoning?.efforts
+    } catch (error) {
+      console.warn(`[team-models] cannot verify route ${route.provider}/${route.model} against the model catalog: ${String(error)}`)
+      return
+    }
+    signal.throwIfAborted()
+    if (route.reasoningEffort !== undefined && efforts !== undefined
+      && !efforts.some((effort) => effort.id === route.reasoningEffort)) {
+      throw new Error(
+        `model ${route.provider}/${route.model} does not support reasoning level "${route.reasoningEffort}"; `
+        + `supported: ${efforts.map((effort) => effort.id).join(', ') || '(none)'}`,
+      )
     }
   }
 
@@ -205,20 +238,26 @@ export function apply(ctx: Context, config: Config): void {
     const setTool = defineTool({
       name: 'team_model_set',
       description:
-        'Set the model route for one teammate. The Team Lead may target any teammate; '
+        'Set the model route and/or reasoning effort for one teammate. The Team Lead may target any teammate; '
         + 'a teammate may target only itself. Route format: "provider/model" with an optional '
         + '"$reasoningLevel" suffix (for example "provider-a/model-a$high"). '
+        + 'Pass effort alone to change only the reasoning level of the member current route. '
+        + 'Reasoning levels are checked against the model catalog when it exposes them. '
         + 'Takes effect on the next step without touching the Lead session or the global default.',
       parameters: {
         target: { type: 'string', required: true, description: 'Teammate name from team_model_list.' },
-        model: { type: 'string', required: true, description: 'Route as "provider/model[$reasoningLevel]".' },
+        model: { type: 'string', description: 'Route as "provider/model[$reasoningLevel]"; omit when changing only effort.' },
+        effort: { type: 'string', description: 'Reasoning level (for example low/medium/high); overrides the model $suffix.' },
       },
       output: jsonOutput(SET_VALUE_SCHEMA),
       async execute(args, exec) {
         const env = await requireEnv(exec.agent, 'team_model_set', exec.signal)
-        const parsed = parseRoute(args.model)
-        if ('error' in parsed) throw new Error(parsed.error)
-        return { row: service.set(env, args.target, parsed) }
+        service.checkTarget(env, args.target)
+        const current = service.routeFor(args.target) ?? env.dispatchOf(args.target)
+        const resolved = resolveSelection(args.model, args.effort, current)
+        if ('error' in resolved) throw new Error(resolved.error)
+        await validateRoute(resolved, exec.signal)
+        return { row: service.set(env, args.target, resolved) }
       },
     })
 
@@ -247,16 +286,24 @@ export function apply(ctx: Context, config: Config): void {
       name: 'team_model_default',
       description:
         'Set or clear the team-wide default model for teammates. Only the Team Lead may call this. '
-        + 'Pass a route as "provider/model[$reasoningLevel]", or omit model to clear the default.',
+        + 'Pass a route as "provider/model[$reasoningLevel]", optionally with a separate effort parameter, '
+        + 'or effort alone to change only the default reasoning level. Omit both to clear the default.',
       parameters: {
-        model: { type: 'string', description: 'Default route as "provider/model[$reasoningLevel]"; omit to clear.' },
+        model: { type: 'string', description: 'Default route as "provider/model[$reasoningLevel]"; omit to clear or adjust effort only.' },
+        effort: { type: 'string', description: 'Reasoning level for the default route; overrides the model $suffix.' },
       },
       output: jsonOutput(DEFAULT_VALUE_SCHEMA),
       async execute(args, exec) {
         const env = await requireEnv(exec.agent, 'team_model_default', exec.signal)
-        const parsed = args.model === undefined ? undefined : parseRoute(args.model)
-        if (parsed !== undefined && 'error' in parsed) throw new Error(parsed.error)
-        const result = service.setDefault(env, parsed)
+        if (args.model === undefined && args.effort === undefined) {
+          const result = service.setDefault(env, undefined)
+          syncModels()
+          return result
+        }
+        const resolved = resolveSelection(args.model, args.effort, service.defaultRoute())
+        if ('error' in resolved) throw new Error(resolved.error)
+        await validateRoute(resolved, exec.signal)
+        const result = service.setDefault(env, resolved)
         syncModels()
         return result
       },

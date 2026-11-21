@@ -76,10 +76,24 @@ function harness(config = {}, seed = disk.state) {
       .filter(a => a.root.id === id && a.id !== id)
       .map(a => ({ kind: 'child', mode: 'continuable', id: a.id, path: a.name }))),
   }
+  const catalog = new Map<string, string[] | 'opaque'>()
+  const unresolved = new Set<string>()
+  const llm = {
+    resolveModelInfo: vi.fn(async (provider: string, model: string) => {
+      const key = `${provider}/${model}`
+      if (unresolved.has(key)) throw new Error(`no adapter owns ${provider}`)
+      const entry = catalog.get(key)
+      return {
+        provider, id: model, name: model,
+        ...(entry === 'opaque' ? {} : { reasoning: { efforts: (entry ?? ['low', 'medium', 'high']).map(id => ({ id })) } }),
+      }
+    }),
+  }
   const ctx: any = {
     agents: { list: () => agents, get: (id: string) => agents.find(a => a.id === id) },
     subagents,
     agentTeams: { isEnabled: () => enabled },
+    llm,
     get(name: string) { return this[name] },
     on: register,
     effect: (factory: any) => effect(factory),
@@ -97,7 +111,7 @@ function harness(config = {}, seed = disk.state) {
     return tool.execute(args, { agent, signal: new AbortController().signal })
   }
   return {
-    lead, child, agents, member, ctx, subagents, pending, emit, call,
+    lead, child, agents, member, ctx, subagents, pending, emit, call, catalog, unresolved, llm,
     install: () => apply(ctx, config),
     disable: async () => { enabled = false; await emit('session/event', lead.session, { type: 'team/mode' }) },
     dispose: () => { for (const fn of cleanup.reverse()) fn() },
@@ -263,5 +277,114 @@ describe('current DSH model selection adapter', () => {
     h.dispose()
     expect(h.lead.tools.size).toBe(0)
     expect(h.child.tools.size).toBe(0)
+  })
+})
+
+describe('reasoning effort selection (0.2.0)', () => {
+  it('changes only the effort of an existing override', async () => {
+    const h = harness()
+    h.install()
+    await h.call(h.lead, 'team_model_set', { target: 'grader', model: 'p/m' })
+    const { row } = await h.call(h.lead, 'team_model_set', { target: 'grader', effort: 'high' })
+    expect(row.model).toBe('p/m$high')
+    expect(h.child.model.current()).toEqual({ provider: 'p', model: 'm', reasoningEffort: 'high' })
+  })
+
+  it('effort-only falls back to the team default route', async () => {
+    const h = harness({ defaultModel: 'team/default$low' })
+    h.install()
+    const { row } = await h.call(h.lead, 'team_model_set', { target: 'grader', effort: 'medium' })
+    expect(row.model).toBe('team/default$medium')
+  })
+
+  it('effort-only uses the live dispatch route when nothing is configured', async () => {
+    const h = harness()
+    h.install()
+    const { row } = await h.call(h.lead, 'team_model_set', { target: 'grader', effort: 'low' })
+    expect(row.model).toBe('original/dispatch$low')
+    expect(h.child.model.current()).toEqual({ provider: 'original', model: 'dispatch', reasoningEffort: 'low' })
+  })
+
+  it('rejects effort-only for a cold member with no known route', async () => {
+    const h = harness()
+    h.install()
+    await h.emit('agent/disposed', { agent: h.child })
+    h.agents.splice(h.agents.indexOf(h.child), 1)
+    h.subagents.listDescendants.mockResolvedValueOnce([
+      { kind: 'child', mode: 'continuable', id: 'child', path: 'grader' },
+    ])
+    await expect(h.call(h.lead, 'team_model_set', { target: 'grader', effort: 'low' }))
+      .rejects.toThrow(/effort-only change needs a known current route/)
+  })
+
+  it('rejects conflicting suffix and effort parameter', async () => {
+    const h = harness()
+    h.install()
+    await expect(h.call(h.lead, 'team_model_set', { target: 'grader', model: 'p/m$low', effort: 'high' }))
+      .rejects.toThrow(/conflicting reasoning levels/)
+    expect(h.child.calls).toEqual([])
+  })
+
+  it('accepts a matching suffix and effort parameter', async () => {
+    const h = harness()
+    h.install()
+    const { row } = await h.call(h.lead, 'team_model_set', { target: 'grader', model: 'p/m$high', effort: 'high' })
+    expect(row.model).toBe('p/m$high')
+  })
+
+  it('rejects an effort the model catalog does not support', async () => {
+    const h = harness()
+    h.catalog.set('p/m', ['low', 'high'])
+    h.install()
+    await expect(h.call(h.lead, 'team_model_set', { target: 'grader', model: 'p/m', effort: 'medium' }))
+      .rejects.toThrow(/does not support reasoning level "medium"; supported: low, high/)
+    expect(h.child.calls).toEqual([])
+  })
+
+  it('passes unverifiable routes through with a warning', async () => {
+    const h = harness()
+    h.unresolved.add('p/m')
+    h.install()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { row } = await h.call(h.lead, 'team_model_set', { target: 'grader', model: 'p/m', effort: 'xhigh' })
+      expect(row.model).toBe('p/m$xhigh')
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining('cannot verify route p/m'))
+    } finally { warning.mockRestore() }
+  })
+
+  it('accepts any effort when the adapter exposes no reasoning metadata', async () => {
+    const h = harness()
+    h.catalog.set('p/m', 'opaque')
+    h.install()
+    const { row } = await h.call(h.lead, 'team_model_set', { target: 'grader', model: 'p/m', effort: 'minimal' })
+    expect(row.model).toBe('p/m$minimal')
+  })
+
+  it('adjusts only the default effort and rejects effort-only without a default', async () => {
+    const h = harness({ defaultModel: 'team/default$low' })
+    h.install()
+    const set = await h.call(h.lead, 'team_model_default', { effort: 'high' })
+    expect(set.defaultModel).toBe('team/default$high')
+    expect(h.child.model.current()).toEqual({ provider: 'team', model: 'default', reasoningEffort: 'high' })
+    await h.call(h.lead, 'team_model_default')
+    await expect(h.call(h.lead, 'team_model_default', { effort: 'low' }))
+      .rejects.toThrow(/effort-only change needs a known current route/)
+  })
+
+  it('lets a teammate adjust its own effort but not another member', async () => {
+    const h = harness()
+    h.install()
+    const { row } = await h.call(h.child, 'team_model_set', { target: 'grader', effort: 'low' })
+    expect(row.model).toBe('original/dispatch$low')
+    await expect(h.call(h.child, 'team_model_set', { target: 'someone', effort: 'low' }))
+      .rejects.toThrow(/only target itself/)
+  })
+
+  it('rejects set with neither model nor effort', async () => {
+    const h = harness()
+    h.install()
+    await expect(h.call(h.lead, 'team_model_set', { target: 'grader' }))
+      .rejects.toThrow(/pass model, effort, or both/)
   })
 })
